@@ -21,23 +21,125 @@ from vina import Vina
 
 # ---------- BOTH ----------
 def load_box(config):
-    """Return (center [x,y,z], size [x,y,z]) from data/box.yaml, using CONFIG for overrides."""
-    raise NotImplementedError
+    """Return docking box center and size."""
+
+    with open(config["box"]) as f:
+        box = yaml.safe_load(f)
+
+    center = config.get("center", box["center"])
+    size = config.get("size", box["size"])
+
+    return center, size
 
 
 # ---------- Student A ----------
 def dock_ligand(receptor, ligand, center, size, exhaustiveness):
-    """Dock one ligand with Vina. Return (best_score, pose_pdbqt_string).
-    Hint: v = Vina(sf_name='vina'); v.set_receptor(...); v.set_ligand_from_file(...);
-    v.compute_vina_maps(center=..., box_size=...); v.dock(exhaustiveness=..., n_poses=5)"""
-    raise NotImplementedError
+    """Dock one ligand with Vina. Return (best_score, pose_pdbqt_string)."""
+    v = Vina(sf_name="vina")
+
+    v.set_receptor(receptor)
+    v.set_ligand_from_file(ligand)
+
+    v.compute_vina_maps(
+        center=center,
+        box_size=size
+    )
+
+    v.dock(
+        exhaustiveness=exhaustiveness,
+        n_poses=5
+    )
+
+    best_score = float(v.energies(n_poses=1)[0][0])
+    pose = v.poses(n_poses=1)
+
+    return best_score, pose
 
 
 def pose_rmsd(pose_pdbqt, crystal_pdbqt):
-    """Heavy-atom RMSD between the docked pose and the crystal ligand (same atom order
-    is NOT guaranteed - match by element and nearest neighbour, or use the symmetry-
-    corrected RMSD from meeko/rdkit)."""
-    raise NotImplementedError
+    """Calculate heavy-atom RMSD between two PDBQT poses."""
+
+    def read_atoms(pdbqt):
+        atoms = []
+
+        for line in pdbqt.splitlines():
+            if line.startswith(("ATOM", "HETATM")):
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+
+                atom_type = line[77:79].strip().upper()
+
+                if atom_type.startswith("H"):
+                    continue
+
+                element = atom_type[0]
+
+                atoms.append({
+                    "element": element,
+                    "coord": np.array([x, y, z], dtype=float)
+                })
+
+        return atoms
+
+    pose_atoms = read_atoms(pose_pdbqt)
+    crystal_atoms = read_atoms(crystal_pdbqt)
+
+    if len(pose_atoms) != len(crystal_atoms):
+        raise ValueError(
+            "Docked and crystal poses have different numbers of heavy atoms."
+        )
+
+    matched_pose = []
+    matched_crystal = []
+    used = set()
+
+    for crystal_atom in crystal_atoms:
+        candidates = [
+            (i, atom)
+            for i, atom in enumerate(pose_atoms)
+            if i not in used
+            and atom["element"] == crystal_atom["element"]
+        ]
+
+        if not candidates:
+            raise ValueError(
+                f"No matching atom found for element {crystal_atom['element']}."
+            )
+
+        best_index, best_atom = min(
+            candidates,
+            key=lambda item: np.linalg.norm(
+                item[1]["coord"] - crystal_atom["coord"]
+            )
+        )
+
+        used.add(best_index)
+        matched_crystal.append(crystal_atom["coord"])
+        matched_pose.append(best_atom["coord"])
+
+    P = np.array(matched_pose)
+    Q = np.array(matched_crystal)
+
+    P_centered = P - P.mean(axis=0)
+    Q_centered = Q - Q.mean(axis=0)
+
+    H = P_centered.T @ Q_centered
+    U, _, Vt = np.linalg.svd(H)
+
+    R = Vt.T @ U.T
+
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+
+    P_aligned = P_centered @ R
+
+    rmsd = np.sqrt(
+        np.mean(np.sum((P_aligned - Q_centered) ** 2, axis=1))
+    )
+
+    return float(rmsd)
 
 
 # ---------- Student B ----------
@@ -53,16 +155,74 @@ def plot_ranking(scores, out="results/ranking.png"):
 
 # ---------- BOTH ----------
 def summary_sentence(rmsd, scores):
-    """One sentence: redocking RMSD, and the rank of sotorasib among the six ligands."""
-    raise NotImplementedError
+    """Summarize redocking RMSD and sotorasib ranking."""
 
+    ordered = scores.sort_values("score", ascending=True).reset_index(drop=True)
 
+    sotorasib_rows = ordered[
+        ordered["ligand"].str.lower().str.contains("sotorasib")
+    ]
+
+    if sotorasib_rows.empty:
+        raise ValueError("Could not find sotorasib in the docking results.")
+
+    rank = int(sotorasib_rows.index[0]) + 1
+
+    return (
+        f"Sotorasib redocking RMSD was {rmsd:.2f} Å, "
+        f"and it ranked {rank} out of {len(ordered)} ligands by Vina score."
+    )
 def main():
     center, size = load_box(CONFIG)
-    # Student A: redock sotorasib + RMSD -> results/redock.csv
-    # Student B: dock all + ranking plot
-    # After the merge: both, then print(summary_sentence(rmsd, scores))
-    raise NotImplementedError
+
+    receptor = CONFIG["receptor"]
+    crystal_ligand = CONFIG["crystal_ligand"]
+    exhaustiveness = CONFIG["exhaustiveness"]
+
+    ligand_files = glob.glob(
+        os.path.join(CONFIG["ligand_dir"], "*.pdbqt")
+    )
+
+    sotorasib = None
+
+    for ligand in ligand_files:
+        if "sotorasib" in os.path.basename(ligand).lower():
+            sotorasib = ligand
+            break
+
+    if sotorasib is None:
+        raise FileNotFoundError(
+            "Could not find the sotorasib ligand in data/ligands."
+        )
+
+    score, pose = dock_ligand(
+        receptor,
+        sotorasib,
+        center,
+        size,
+        exhaustiveness
+    )
+
+    rmsd = pose_rmsd(
+        pose,
+        open(crystal_ligand).read()
+    )
+
+    os.makedirs("results", exist_ok=True)
+
+    pd.DataFrame([
+        {
+            "ligand": "sotorasib",
+            "score": score,
+            "rmsd": rmsd
+        }
+    ]).to_csv(
+        "results/redock.csv",
+        index=False
+    )
+
+    print(f"Sotorasib docking score: {score:.2f} kcal/mol")
+    print(f"Sotorasib redocking RMSD: {rmsd:.2f} Å")
 
 
 if __name__ == "__main__":
