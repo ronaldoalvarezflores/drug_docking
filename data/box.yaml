@@ -1,4 +1,8 @@
-# Docking box around the switch-II pocket of KRAS G12C (PDB 6OIM).
-# Filled in by prepare_receptor.py (center = centroid of the crystal sotorasib, size = extent + 8 A).
-center: null
-size: null
+center:
+- 1.87
+- -8.26
+- -1.36
+size:
+- 21.9
+- 19.7
+- 13.9

@@ -24,10 +24,25 @@ Docking six ligands at exhaustiveness 4 takes about a minute per ligand on a lap
 
     ## Results (fill in after the merge)
 
-    <!-- one sentence answering the research question, one figure -->
+  AutoDock Vina did not rank sotorasib first among the six ligands: sotorasib ranked 2nd by Vina score, while its redocking RMSD was 0.28 Å.
+
+![Docking score ranking](results/ranking.png)
 
     ## Reflection
 
     1. What caused each merge conflict?
+    The merge conflicts were caused by both students modifying the same shared files and, in particular, the same functions in `analysis.py`. Student A and Student B worked independently on their branches, so Git could not automatically determine which version should be kept when both branches changed overlapping parts of the same file.
+    
+    A second conflict occurred in `results/summary.md` because both students created and modified the same file independently on `main`. When Student B tried to push after Student A had already pushed, Git rejected the push because the remote branch contained changes that were not present locally.
+
     2. How could branching strategy or file layout have avoided it?
+    The conflicts could have been reduced by assigning different files or clearly separated sections of the code to each student. For example, Student A and Student B could have implemented their functionality in separate modules and then combined them through a shared main script.
+    
+    Another option would have been to avoid having both students modify the same shared functions independently. Clear ownership of each file or function would reduce overlapping changes and make automatic merging easier.
+
     3. What is the difference between the history produced by `git pull` and `git pull --rebase`?
+    `git pull` fetches the remote changes and then merges them into the local branch. If both the local and remote branches have new commits, this can create an additional merge commit.
+    
+    `git pull --rebase` also fetches the remote changes, but instead of creating a merge commit, it temporarily removes the local commits, applies the remote changes first, and then reapplies the local commits on top of them. This produces a more linear history.
+    
+    In this exercise, Student B used `git pull --rebase` after the rejected push, which allowed the local Student B commit to be reapplied on top of Student A's remote commit after resolving the conflict.

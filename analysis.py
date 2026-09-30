@@ -143,6 +143,77 @@ def pose_rmsd(pose_pdbqt, crystal_pdbqt):
 
 
 # ---------- Student B ----------
+def pose_rmsd(pose_pdbqt, crystal_pdbqt):
+    """Calculate heavy-atom RMSD between docked and crystal poses."""
+
+    def read_atoms(pdbqt):
+        atoms = {}
+
+        for line in pdbqt.splitlines():
+            if line.startswith(("ATOM", "HETATM")):
+                atom_name = line[12:16].strip()
+
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+
+                atom_type = line[77:79].strip().upper()
+
+                if atom_type.startswith("H"):
+                    continue
+
+                atoms[atom_name] = np.array(
+                    [x, y, z],
+                    dtype=float
+                )
+
+        return atoms
+
+    pose_atoms = read_atoms(pose_pdbqt)
+    crystal_atoms = read_atoms(crystal_pdbqt)
+
+    common_atoms = sorted(
+        set(pose_atoms.keys()) & set(crystal_atoms.keys())
+    )
+
+    if not common_atoms:
+        raise ValueError(
+            "No matching heavy atoms found between docked and crystal poses."
+        )
+
+    if len(common_atoms) != len(pose_atoms) or len(common_atoms) != len(crystal_atoms):
+        raise ValueError(
+            "Docked and crystal poses do not contain the same heavy atoms."
+        )
+
+    P = np.array([pose_atoms[name] for name in common_atoms])
+    Q = np.array([crystal_atoms[name] for name in common_atoms])
+
+    P_centered = P - P.mean(axis=0)
+    Q_centered = Q - Q.mean(axis=0)
+
+    H = P_centered.T @ Q_centered
+    U, _, Vt = np.linalg.svd(H)
+
+    R = Vt.T @ U.T
+
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+
+    P_aligned = P_centered @ R
+
+    rmsd = np.sqrt(
+        np.mean(
+            np.sum(
+                (P_aligned - Q_centered) ** 2,
+                axis=1
+            )
+        )
+    )
+
+    return float(rmsd)
+
 def dock_all(receptor, ligand_dir, center, size, exhaustiveness, exclude_ligands=()):
     """Dock ligand files, optionally excluding basenames; return ligand and score columns."""
     ligand_files = sorted(glob.glob(os.path.join(ligand_dir, "*.pdbqt")))
@@ -198,65 +269,59 @@ def plot_ranking(scores, out="results/ranking.png"):
     os.makedirs(output_dir, exist_ok=True)
     figure.savefig(out, dpi=150)
     plt.close(figure)
-
-
+    
 # ---------- BOTH ----------
 def summary_sentence(rmsd, scores):
     """One sentence: redocking RMSD, and the rank of sotorasib among the six ligands."""
     if not {"ligand", "score"}.issubset(scores.columns):
         raise ValueError("scores must contain 'ligand' and 'score' columns")
 
-    sotorasib_mask = scores["ligand"].astype(str).str.contains("sotorasib", case=False)
+    sotorasib_mask = (
+        scores["ligand"]
+        .astype(str)
+        .str.contains("sotorasib", case=False)
+    )
+
     if not sotorasib_mask.any():
         raise ValueError("scores do not contain a sotorasib ligand")
 
     numeric_scores = pd.to_numeric(scores["score"], errors="raise")
+
     if not np.isfinite(numeric_scores).all():
         raise ValueError("scores must contain only finite numeric values")
+
     numeric_rmsd = float(rmsd)
+
     if not np.isfinite(numeric_rmsd) or numeric_rmsd < 0:
         raise ValueError("rmsd must be a finite, non-negative number")
 
     best_sotorasib_score = numeric_scores[sotorasib_mask].min()
     rank = int((numeric_scores < best_sotorasib_score).sum()) + 1
+
     return (
         f"The redocking RMSD was {numeric_rmsd:.2f} A, and sotorasib ranked "
         f"{rank} of {len(scores)} ligands by Vina score."
     )
 
-    if sotorasib_rows.empty:
-        raise ValueError("Could not find sotorasib in the docking results.")
 
-    rank = int(sotorasib_rows.index[0]) + 1
-
-    return (
-        f"Sotorasib redocking RMSD was {rmsd:.2f} Å, "
-        f"and it ranked {rank} out of {len(ordered)} ligands by Vina score."
-    )
 def main():
     center, size = load_box(CONFIG)
 
     receptor = CONFIG["receptor"]
+    ligand_dir = CONFIG["ligand_dir"]
     crystal_ligand = CONFIG["crystal_ligand"]
-    exhaustiveness = CONFIG["exhaustiveness"]
 
-    ligand_files = glob.glob(
-        os.path.join(CONFIG["ligand_dir"], "*.pdbqt")
-    )
+    exhaustiveness = int(CONFIG.get("exhaustiveness", 8))
 
-    sotorasib = None
-
-    for ligand in ligand_files:
-        if "sotorasib" in os.path.basename(ligand).lower():
-            sotorasib = ligand
-            break
-
-    if sotorasib is None:
-        raise FileNotFoundError(
-            "Could not find the sotorasib ligand in data/ligands."
+    if exhaustiveness < 1:
+        raise ValueError(
+            "Set 'exhaustiveness' to a positive integer in config.yaml"
         )
 
-    score, pose = dock_ligand(
+    sotorasib = os.path.join(ligand_dir, "sotorasib.pdbqt")
+
+    # Redocking of sotorasib
+    redock_score, pose_pdbqt = dock_ligand(
         receptor,
         sotorasib,
         center,
@@ -264,27 +329,52 @@ def main():
         exhaustiveness
     )
 
-    rmsd = pose_rmsd(
-        pose,
-        open(crystal_ligand).read()
-    )
+    with open(crystal_ligand, encoding="utf-8") as crystal_file:
+        crystal_pdbqt = crystal_file.read()
 
+    rmsd = pose_rmsd(pose_pdbqt, crystal_pdbqt)
+
+    # Save redocking result
     os.makedirs("results", exist_ok=True)
 
-    pd.DataFrame([
-        {
+    pd.DataFrame(
+        [{
             "ligand": "sotorasib",
-            "score": score,
+            "score": redock_score,
             "rmsd": rmsd
-        }
-    ]).to_csv(
+        }]
+    ).to_csv(
         "results/redock.csv",
         index=False
     )
 
-    print(f"Sotorasib docking score: {score:.2f} kcal/mol")
-    print(f"Sotorasib redocking RMSD: {rmsd:.2f} Å")
+    # Dock all other ligands
+    scores = dock_all(
+        receptor,
+        ligand_dir,
+        center,
+        size,
+        exhaustiveness,
+        exclude_ligands={"sotorasib"}
+    )
+
+    # Add sotorasib redocking score
+    scores = pd.concat(
+        [
+            scores,
+            pd.DataFrame(
+                [{"ligand": "sotorasib", "score": redock_score}]
+            )
+        ],
+        ignore_index=True
+    )
+
+    # Plot ranking
+    plot_ranking(scores)
+
+    # Print final summary
+    print(summary_sentence(rmsd, scores))
 
 
 if __name__ == "__main__":
-    main()
+    main() 
